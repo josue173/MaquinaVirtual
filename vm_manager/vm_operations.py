@@ -1,26 +1,29 @@
-import libvirt
 import os
+import subprocess
+import libvirt
+from typing import List, Dict, Optional
 
 class VMManager:
     def __init__(self, connector):
         self.connector = connector
-    
-    def list_vms(self):
+
+    def list_vms(self) -> List[Dict]:
+        """Lista todas las máquinas virtuales con su estado"""
         conn = self.connector.get_connection()
         domains = conn.listAllDomains(0)
-
+        
         vms = []
         for domain in domains:
             try:
+                info = domain.info()
                 vms.append({
                     'id': domain.ID() if domain.ID() >= 0 else "N/A",
                     'name': domain.name(),
-                    'state': "running" if domain.isActive() else "shutoff",
-                    'memory': domain.info()[1] // 1024,  # Memoria en MB
-                    'vcpus': domain.info()[3]  # vCPUs
+                    'state': "running" if info[0] == libvirt.VIR_DOMAIN_RUNNING else "shutoff",
+                    'memory': info[1] // 1024,  # Convertir a MB
+                    'vcpus': info[3]  # Número de vCPUs
                 })
             except libvirt.libvirtError:
-                # Si falla, usar valores por defecto
                 vms.append({
                     'id': "N/A",
                     'name': domain.name(),
@@ -29,51 +32,106 @@ class VMManager:
                     'vcpus': "N/A"
                 })
         return vms
-    
-    def start_vm(self, vm_name):
+
+    def start_vm(self, vm_name: str) -> None:
+        """Inicia una máquina virtual por nombre"""
         conn = self.connector.get_connection()
         try:
-            domain = conn.lookupByName(vm_name)  # Buscar por nombre
-            if domain.create() < 0:  # Iniciar VM
-                raise Exception("Error al iniciar la VM (código de retorno negativo)")
+            domain = conn.lookupByName(vm_name)
+            if domain.create() < 0:
+                raise Exception("No se pudo iniciar la VM (código negativo)")
         except libvirt.libvirtError as e:
             raise Exception(f"Error de Libvirt: {e}")
-    
-    def stop_vm(self, vm_id):
+
+    def stop_vm(self, vm_identifier: str) -> None:
+        """Detiene una VM por ID o nombre"""
         conn = self.connector.get_connection()
         try:
-            vm_id = int(vm_id)
-            domain = conn.lookupByID(vm_id)
-        except:
-            domain = conn.lookupByName(vm_id)
+            if vm_identifier.isdigit():
+                domain = conn.lookupByID(int(vm_identifier))
+            else:
+                domain = conn.lookupByName(vm_identifier)
+            
+            if domain.destroy() < 0:
+                raise Exception("No se pudo detener la VM")
+        except libvirt.libvirtError as e:
+            raise Exception(f"Error de Libvirt: {e}")
+
+    def create_vm(self, name: str, memory: int, vcpus: int, 
+                disk_size: int, os_type: str, iso_path: str) -> libvirt.virDomain:
+        """Crea una nueva VM con manejo robusto de errores"""
+        # Validaciones iniciales
+        if not os.path.exists(iso_path):
+            raise Exception(f"Archivo ISO no encontrado: {iso_path}")
         
-        if domain.destroy() < 0:
-            raise Exception("No se pudo detener la máquina virtual")
-    
-    def create_vm(self, name, memory, vcpus, disk_size, os_type, iso_path):
-        # Eliminar espacios del nombre para el archivo de disco
-        disk_name = name.replace(" ", "_") + ".qcow2"
+        disk_name = f"{name.replace(' ', '_')}.qcow2"
         disk_path = f"/var/lib/libvirt/images/{disk_name}"
+        
+        try:
+            # 1. Crear disco virtual
+            self._create_disk_image(disk_path, disk_size)
+            
+            # 2. Generar configuración XML
+            xml_config = self._generate_vm_xml(
+                name=name,
+                memory=memory,
+                vcpus=vcpus,
+                os_type=os_type,
+                iso_path=iso_path,
+                disk_path=disk_path
+            )
+            
+            # 3. Definir la VM
+            domain = self.connector.get_connection().defineXML(xml_config.strip())
+            if not domain:
+                raise Exception("Error al definir dominio")
+            
+            return domain
+            
+        except Exception as e:
+            # Limpieza en caso de error
+            if os.path.exists(disk_path):
+                os.remove(disk_path)
+            raise Exception(f"No se pudo crear la MV: {str(e)}")
 
-        # Verificar si el directorio existe
-        if not os.path.exists('/var/lib/libvirt/images'):
-            os.makedirs('/var/lib/libvirt/images', mode=0o775)
-            os.chown('/var/lib/libvirt/images', 0, 109)  # root:libvirt
+    def _create_disk_image(self, disk_path: str, size_gb: int) -> None:
+        """Crea un disco virtual con los permisos correctos"""
+        try:
+            # Asegurar que el directorio existe
+            os.makedirs(os.path.dirname(disk_path), exist_ok=True, mode=0o775)
+            
+            # Crear disco (con sudo para permisos)
+            subprocess.run(
+                ['sudo', 'qemu-img', 'create', '-f', 'qcow2', disk_path, f'{size_gb}G'],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Ajustar permisos
+            subprocess.run(
+                ['sudo', 'chown', 'libvirt-qemu:libvirt', disk_path],
+                check=True
+            )
+            subprocess.run(
+                ['sudo', 'chmod', '660', disk_path],
+                check=True
+            )
+            
+        except subprocess.CalledProcessError as e:
+            raise Exception(f"Error al crear disco: {e.stderr}")
 
-        # Crear el disco (manejar espacios en la ruta)
-        os.system(f"qemu-img create -f qcow2 '{disk_path}' {disk_size}G")
-        os.chown(disk_path, 64055, 109)  # libvirt-qemu:libvirt
-        os.chmod(disk_path, 0o660)
-
-        # Crear el XML de definición de la máquina virtual
-        xml_template = f"""
+    def _generate_vm_xml(self, name: str, memory: int, vcpus: int,
+                       os_type: str, iso_path: str, disk_path: str) -> str:
+        """Genera el XML de configuración para la VM"""
+        return f"""
         <domain type='kvm'>
             <name>{name}</name>
             <memory unit='MB'>{memory}</memory>
             <vcpu>{vcpus}</vcpu>
             <os>
                 <type arch='x86_64' machine='pc-q35-6.2'>hvm</type>
-                <boot dev='cdrom'/>
             </os>
             <features>
                 <acpi/>
@@ -91,9 +149,8 @@ class VMManager:
                 </disk>
                 <disk type='file' device='disk'>
                     <driver name='qemu' type='qcow2'/>
-                    <source file='/var/lib/libvirt/images/{name}.qcow2'/>
+                    <source file='{disk_path}'/>
                     <target dev='vda' bus='virtio'/>
-                    <boot order='2'/>
                 </disk>
                 <controller type='usb' index='0' model='qemu-xhci' ports='15'/>
                 <controller type='sata' index='0'/>
@@ -104,45 +161,11 @@ class VMManager:
                 </interface>
                 <graphics type='spice' autoport='yes'>
                     <listen type='address'/>
-                    <image compression='off'/>
                 </graphics>
                 <video>
-                    <model type='qxl' ram='65536' vram='65536' vgamem='16384' heads='1'/>
+                    <model type='qxl' ram='65536' vram='65536' heads='1'/>
                 </video>
                 <memballoon model='virtio'/>
             </devices>
         </domain>
         """
-
-        graphics_xml = """
-        <devices>
-            <graphics type='spice' autoport='yes'>
-                <listen type='address'/>
-            </graphics>
-            <video>
-                <model type='qxl' ram='65536' vram='65536' vgamem='16384' heads='1'/>
-            </video>
-        </devices>
-        """
-        
-        xml_template = f"""
-        <domain type='kvm'>
-            <!-- Configuración existente -->
-            {graphics_xml}
-        </domain>
-        """
-        
-        # Crear el disco virtual
-        disk_path = f"/var/lib/libvirt/images/{name}.qcow2"
-        if os.path.exists(disk_path):
-            raise Exception(f"El disco {disk_path} ya existe")
-        
-        # Crear el disco con qemu-img (requiere qemu-utils instalado)
-        os.system(f"qemu-img create -f qcow2 {disk_path} {disk_size}G")
-        
-        # Definir la máquina virtual
-        domain = conn.defineXML(xml_template.strip())
-        if domain is None:
-            raise Exception("No se pudo definir la máquina virtual")
-        
-        return domain
