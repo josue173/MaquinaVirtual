@@ -184,13 +184,15 @@ class VirtualizationManagerApp:
     def stop_selected_vm(self):
         selected_item = self.vm_tree.selection()
         if not selected_item:
-            messagebox.showwarning("Advertencia", "Seleccione una máquina virtual")
+            messagebox.showwarning("Advertencia", "Seleccione una VM")
             return
-            
-        vm_id = self.vm_tree.item(selected_item, 'text')
+        
+        # Obtener solo el NOMBRE (no usar el ID)
+        vm_name = self.vm_tree.item(selected_item, 'values')[0]  # Primera columna es el nombre
+        
         try:
-            self.vm_manager.stop_vm(vm_id)
+            self.vm_manager.stop_vm(vm_name)  # Siempre pasar el nombre como string
             self.refresh_vm_list()
-            messagebox.showinfo("Éxito", "Máquina virtual detenida correctamente")
+            messagebox.showinfo("Éxito", f"VM {vm_name} detenida")
         except Exception as e:
-            messagebox.showerror("Error", f"No se pudo detener la MV: {str(e)}")
+            messagebox.showerror("Error", f"No se pudo detener: {str(e)}")

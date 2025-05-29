@@ -43,27 +43,15 @@ class VMManager:
         except libvirt.libvirtError as e:
             raise Exception(f"Error de Libvirt: {e}")
 
-    def stop_vm(self, vm_identifier) -> None:
-        """Detiene una VM por ID (entero) o nombre (string)"""
+    def stop_vm(self, vm_name: str) -> None:
+        """Versión simplificada que solo usa nombres"""
         conn = self.connector.get_connection()
         try:
-            # Si es un string que representa un número (ej: "5")
-            if isinstance(vm_identifier, str) and vm_identifier.isdigit():
-                domain = conn.lookupByID(int(vm_identifier))
-            # Si es directamente un entero (ej: 5)
-            elif isinstance(vm_identifier, int):
-                domain = conn.lookupByID(vm_identifier)
-            # Si es un nombre (string)
-            else:
-                domain = conn.lookupByName(str(vm_identifier))
-
+            domain = conn.lookupByName(str(vm_name))  # Asegurar que es string
             if domain.destroy() < 0:
-                raise Exception("Código de retorno negativo al detener")
-            
+                raise Exception("Código de retorno negativo")
         except libvirt.libvirtError as e:
-            raise Exception(f"Error de Libvirt: {e}")
-        except Exception as e:
-            raise Exception(f"Error al detener VM: {str(e)}")
+            raise Exception(f"Error Libvirt: {e}")
 
     def create_vm(self, name: str, memory: int, vcpus: int, 
                 disk_size: int, os_type: str, iso_path: str) -> libvirt.virDomain:
